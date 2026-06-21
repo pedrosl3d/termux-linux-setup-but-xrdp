@@ -8,10 +8,13 @@
 #  - Productivity and Media tools (VLC, Firefox)
 #  - Python & Web Dev environment pre-installed
 #  - Windows App Support (Wine/Hangover)
+#  - XRDP Remote Desktop: connect from Windows' native
+#    Remote Desktop Connection (mstsc), no extra APK needed
 #######################################################
 
 # ============== CONFIGURATION ==============
-TOTAL_STEPS=11
+TOTAL_STEPS=12
+RDP_PORT=3389
 CURRENT_STEP=0
 DE_CHOICE="1"
 DE_NAME="XFCE4"
@@ -168,14 +171,31 @@ step_repos() {
     install_pkg "tur-repo" "TUR Repository (Firefox)"
 }
 
-# ============== STEP 3: INSTALL TERMUX-X11 ==============
-step_x11() {
+# ============== STEP 3: INSTALL XRDP (REMOTE DESKTOP) ==============
+step_xrdp() {
     update_progress
-    echo -e "${PURPLE}[Step ${CURRENT_STEP}/${TOTAL_STEPS}] Installing Termux-X11...${NC}"
+    echo -e "${PURPLE}[Step ${CURRENT_STEP}/${TOTAL_STEPS}] Installing XRDP (Remote Desktop Server)...${NC}"
     echo ""
-    install_pkg "termux-x11-nightly" "Termux-X11 Display Server"
+    install_pkg "xrdp" "XRDP Server"
     install_pkg "xorg-xrandr" "XRandR (Display Settings)"
+    install_pkg "iproute2" "Network Tools (IP detection)"
+    install_pkg "passwd" "Login Password Utility"
+
+    # Make sure xrdp listens on all network interfaces (so the PC on the
+    # same Wi-Fi can reach it), not just localhost.
+    XRDP_INI="$PREFIX/etc/xrdp/xrdp.ini"
+    if [ -f "$XRDP_INI" ]; then
+        sed -i "s/^address=.*/address=0.0.0.0/" "$XRDP_INI" 2>/dev/null
+        sed -i "s/^port=.*/port=${RDP_PORT}/" "$XRDP_INI" 2>/dev/null
+    fi
+
+    echo ""
+    echo -e "${YELLOW}[!] O XRDP autentica a conexao com uma senha Unix do seu usuario Termux.${NC}"
+    echo -e "${YELLOW}[!] Defina agora uma senha para '$(whoami)' (sera pedida ao conectar pelo PC):${NC}"
+    echo ""
+    passwd
 }
+
 
 # ============== STEP 4: INSTALL DESKTOP ==============
 step_desktop() {
@@ -343,36 +363,48 @@ PLANKEOF
         rm -f ~/.config/autostart/plank.desktop 2>/dev/null
     fi
 
-    # Determine execution commands and kill commands based on DE
+    # Determine session/kill commands based on DE
     case $DE_CHOICE in
         1)
-            EXEC_CMD="exec startxfce4"
+            SESSION_CMD="startxfce4"
             KILL_CMD="pkill -9 xfce4-session; pkill -9 plank"
             ;;
         2)
-            EXEC_CMD="exec startlxqt"
+            SESSION_CMD="startlxqt"
             KILL_CMD="pkill -9 lxqt-session"
             ;;
         3)
-            EXEC_CMD="exec mate-session"
+            SESSION_CMD="mate-session"
             KILL_CMD="pkill -9 mate-session; pkill -9 plank"
             ;;
         4)
-            EXEC_CMD="(sleep 5 && pkill -9 plasmashell && plasmashell) > /dev/null 2>&1 &\nexec startplasma-x11"
+            SESSION_CMD="startplasma-x11"
             KILL_CMD="pkill -9 startplasma-x11; pkill -9 kwin_x11"
             ;;
     esac
 
-    # Main Launcher
-    cat > ~/start-linux.sh << LAUNCHEREOF
+    # ~/.xsession is what xrdp-sesman runs when a Windows client logs in.
+    # This replaces "launching the DE directly" from the old termux-x11 flow.
+    cat > ~/.xsession << SESSIONEOF
+#!/data/data/com.termux/files/usr/bin/bash
+source ~/.config/linux-gpu.sh 2>/dev/null
+exec ${SESSION_CMD}
+SESSIONEOF
+    chmod +x ~/.xsession
+    echo -e "  [+] Created ~/.xsession (${DE_NAME} session for XRDP)"
+
+    # Main Launcher: starts the xrdp daemons + audio. The actual desktop
+    # is started automatically by xrdp-sesman via ~/.xsession once you
+    # connect from the Windows Remote Desktop client.
+    cat > ~/start-xrdp.sh << LAUNCHEREOF
 #!/data/data/com.termux/files/usr/bin/bash
 echo ""
-echo "[*] Starting ${DE_NAME}..."
+echo "[*] Starting XRDP (${DE_NAME})..."
 echo ""
-source ~/.config/linux-gpu.sh 2>/dev/null
 
 echo "[*] Cleaning up old sessions..."
-pkill -9 -f "termux.x11" 2>/dev/null
+pkill -9 -f "xrdp-sesman" 2>/dev/null
+pkill -9 -f "xrdp" 2>/dev/null
 ${KILL_CMD} 2>/dev/null
 pkill -9 -f "dbus" 2>/dev/null
 
@@ -385,32 +417,35 @@ sleep 1
 pactl load-module module-native-protocol-tcp auth-ip-acl=127.0.0.1 auth-anonymous=1 2>/dev/null
 export PULSE_SERVER=127.0.0.1
 
-echo "[*] Starting X11 server..."
-termux-x11 :0 -ac &
-sleep 3
-export DISPLAY=:0
+echo "[*] Starting XRDP services..."
+xrdp-sesman > ~/.xrdp-sesman.log 2>&1 &
+sleep 1
+xrdp --nodaemon > ~/.xrdp.log 2>&1 &
+sleep 2
 
-echo "-----------------------------------------------"
-echo "  [*] Open Termux-X11 app to view desktop!"
-echo "-----------------------------------------------"
+bash ~/rdp-info.sh
+
+echo "[*] XRDP esta rodando. Mantenha o Termux aberto enquanto usar a area de trabalho."
+echo "[*] Para parar: ./stop-xrdp.sh"
 echo ""
-${EXEC_CMD}
+wait
 LAUNCHEREOF
-    chmod +x ~/start-linux.sh
-    echo -e "  [+] Created ~/start-linux.sh"
+    chmod +x ~/start-xrdp.sh
+    echo -e "  [+] Created ~/start-xrdp.sh"
     
     # Stopper
-    cat > ~/stop-linux.sh << STOPEOF
+    cat > ~/stop-xrdp.sh << STOPEOF
 #!/data/data/com.termux/files/usr/bin/bash
-echo "Stopping ${DE_NAME}..."
-pkill -9 -f "termux.x11" 2>/dev/null
+echo "Stopping XRDP and ${DE_NAME}..."
+pkill -9 -f "xrdp-sesman" 2>/dev/null
+pkill -9 -f "xrdp" 2>/dev/null
 pkill -9 -f "pulseaudio" 2>/dev/null
 ${KILL_CMD} 2>/dev/null
 pkill -9 -f "dbus" 2>/dev/null
-echo "Desktop stopped."
+echo "Remote desktop stopped."
 STOPEOF
-    chmod +x ~/stop-linux.sh
-    echo -e "  [+] Created ~/stop-linux.sh"
+    chmod +x ~/stop-xrdp.sh
+    echo -e "  [+] Created ~/stop-xrdp.sh"
 }
 
 # ============== STEP 11: CREATE SHORTCUTS ==============
@@ -466,7 +501,52 @@ EOF
     echo -e "  [+] Added Firefox, VLC, Wine, and Terminal shortcuts."
 }
 
-# ============== COMPLETION ==============
+# ============== STEP 12: CONNECTION INFO ==============
+step_connection_info() {
+    update_progress
+    echo -e "${PURPLE}[Step ${CURRENT_STEP}/${TOTAL_STEPS}] Generating connection info...${NC}"
+    echo ""
+
+    # Reusable script: IP can change (e.g. switched Wi-Fi), so the user
+    # can re-run this anytime to get fresh connection details.
+    cat > ~/rdp-info.sh << INFOEOF
+#!/data/data/com.termux/files/usr/bin/bash
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; WHITE='\033[1;37m'; NC='\033[0m'
+
+usuario=\$(whoami)
+porta=${RDP_PORT}
+ip_local=\$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if (\$i=="src") print \$(i+1)}')
+
+if [ -z "\$ip_local" ]; then
+    ip_local=\$(ip -4 addr show 2>/dev/null | grep -oE 'inet [0-9.]+' | grep -v '127.0.0.1' | head -n1 | awk '{print \$2}')
+fi
+[ -z "\$ip_local" ] && ip_local="(nao detectado - rode 'ip addr' manualmente)"
+
+echo ""
+echo -e "\${CYAN}=========================================================\${NC}"
+echo -e "\${WHITE}        COMO CONECTAR PELO WINDOWS (Remote Desktop)\${NC}"
+echo -e "\${CYAN}=========================================================\${NC}"
+echo -e "  \${WHITE}Endereco/IP:\${NC}  \${GREEN}\${ip_local}\${NC}"
+echo -e "  \${WHITE}Porta:\${NC}       \${GREEN}\${porta}\${NC}"
+echo -e "  \${WHITE}Usuario:\${NC}     \${GREEN}\${usuario}\${NC}"
+echo -e "  \${WHITE}Senha:\${NC}       \${YELLOW}(a que voce definiu com 'passwd')\${NC}"
+echo -e "\${CYAN}=========================================================\${NC}"
+echo -e "  No Windows, abra \${WHITE}Conexao de Area de Trabalho Remota\${NC} (mstsc)"
+echo -e "  e digite: \${GREEN}\${ip_local}:\${porta}\${NC}"
+echo -e "\${CYAN}=========================================================\${NC}"
+echo ""
+echo -e "\${YELLOW}[!] O celular e o PC precisam estar na mesma rede Wi-Fi.\${NC}"
+echo -e "\${YELLOW}[!] Se o IP mudar, rode de novo: \${WHITE}bash ~/rdp-info.sh\${NC}"
+echo ""
+INFOEOF
+    chmod +x ~/rdp-info.sh
+    echo -e "  [+] Created ~/rdp-info.sh (run anytime to see current connection info)"
+    echo ""
+
+    bash ~/rdp-info.sh
+}
+
+
 show_completion() {
     echo ""
     echo -e "${GREEN}"
@@ -483,11 +563,25 @@ COMPLETE
     echo "    - Firefox Browser & VLC Media Player"
     echo "    - Wine & Hangover (Windows PC App compatibility)"
     echo "    - GPU Hardware Acceleration Enabled"
+    echo "    - XRDP Remote Desktop Server"
     echo ""
     echo -e "${YELLOW}------------------------------------------------------------${NC}"
-    echo -e "${WHITE}[*] TO START THE DESKTOP:${NC}  ${GREEN}./start-linux.sh${NC}"
-    echo -e "${WHITE}[*] TO STOP THE DESKTOP:${NC}   ${GREEN}./stop-linux.sh${NC}"
+    echo -e "${WHITE}[*] TO START THE DESKTOP:${NC}      ${GREEN}./start-xrdp.sh${NC}"
+    echo -e "${WHITE}[*] TO STOP THE DESKTOP:${NC}       ${GREEN}./stop-xrdp.sh${NC}"
+    echo -e "${WHITE}[*] CONNECTION INFO ANYTIME:${NC}   ${GREEN}./rdp-info.sh${NC}"
     echo -e "${YELLOW}------------------------------------------------------------${NC}"
+    echo ""
+    echo -e "${WHITE}[*] No Windows, abra 'Conexao de Area de Trabalho Remota' (mstsc)${NC}"
+    echo -e "${WHITE}    e use o IP/usuario/senha mostrados acima.${NC}"
+    echo ""
+    echo -e "${YELLOW}[!] Observacoes:${NC}"
+    echo -e "    - Celular e PC precisam estar na mesma rede Wi-Fi."
+    echo -e "    - Mantenha o Termux aberto (nao remova da tela de apps recentes)"
+    echo -e "      enquanto estiver usando a area de trabalho remota."
+    echo -e "    - Audio dos apps toca no alto-falante do celular, nao e"
+    echo -e "      redirecionado para o PC pelo XRDP."
+    echo -e "    - XRDP costuma ser um pouco mais lento/instavel que o"
+    echo -e "      Termux-X11 nativo (overhead de codificar a tela via RDP)."
     echo ""
 }
 
@@ -498,7 +592,7 @@ main() {
     
     step_update
     step_repos
-    step_x11
+    step_xrdp
     step_desktop
     step_gpu
     step_audio
@@ -507,6 +601,7 @@ main() {
     step_wine
     step_launchers
     step_shortcuts
+    step_connection_info
     
     show_completion
 }
