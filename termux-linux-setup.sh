@@ -515,12 +515,30 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; WH
 
 usuario=\$(whoami)
 porta=${RDP_PORT}
-ip_local=\$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if (\$i=="src") print \$(i+1)}')
+ip_local=""
 
+# Method 1: Python socket trick. This is the most reliable on Android -
+# it only opens a regular AF_INET/UDP socket (no actual packets are sent),
+# which avoids the AF_NETLINK restriction that blocks 'ip' on many
+# devices/Android versions ("Cannot bind netlink socket: Permission denied").
+if command -v python3 >/dev/null 2>&1; then
+    ip_local=\$(python3 -c "import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(('8.8.8.8',80)); print(s.getsockname()[0]); s.close()" 2>/dev/null)
+fi
+
+# Method 2: 'ip' command - works on some devices, but is blocked on
+# others with a netlink permission error. Harmless to try as a fallback.
+if [ -z "\$ip_local" ]; then
+    ip_local=\$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if (\$i=="src") print \$(i+1)}')
+fi
 if [ -z "\$ip_local" ]; then
     ip_local=\$(ip -4 addr show 2>/dev/null | grep -oE 'inet [0-9.]+' | grep -v '127.0.0.1' | head -n1 | awk '{print \$2}')
 fi
-[ -z "\$ip_local" ] && ip_local="(nao detectado - rode 'ip addr' manualmente)"
+
+# Method 3: nothing worked - point the user to Android's own Wi-Fi
+# settings, which always shows the IP regardless of OS-level restrictions.
+if [ -z "\$ip_local" ]; then
+    ip_local="(nao detectado - veja em Config. > Wi-Fi > toque na rede conectada > Endereco IP)"
+fi
 
 echo ""
 echo -e "\${CYAN}=========================================================\${NC}"
